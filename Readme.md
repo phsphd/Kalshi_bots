@@ -189,103 +189,117 @@ QUOTE_REQUIRE_FRESH=false         # when freshness is set, require timestamped q
 
 
 
+# Kalshi Sports Bot (Go)
+
+Trades Kalshi sports markets using fair probabilities from bookmaker odds and ML predictions synced from the Python bot. Dry‑run by default; includes basic risk controls and Prometheus metrics.
+
+## Features
+- Fair price from bookmaker consensus (vig‑removed), optional ML override via SQLite.
+- Thresholds for edge and confidence; slippage guard vs Kalshi ask.
+- IOC or GTC + post‑only; simple sizing; bankroll/exposure gauges.
+- SQLite storage (predictions/signals/bets); Prometheus metrics and health endpoints.
+
+## Configure
+Create a `.env` next to the binary (see `.env.example`). Key settings:
+
+```
+# Mode
+DRY_RUN=true                  # Start safely; no live orders
+LOG_LEVEL=INFO
+
+# Kalshi
+KALSHI_BASE=https://api.elections.kalshi.com/trade-api/v2
+KALSHI_API_KEY_ID=
+KALSHI_PRIVATE_KEY_PATH=
+
+# Odds (bookmaker data)
+ODDS_API_KEY=
+ODDS_API_BASE=https://api.the-odds-api.com/v4
+LEAGUES=NBA,NFL               # First league drives odds ingest
+
+# Strategy thresholds
+MIN_EDGE_BPS=150              # Min |fair - venue| in bps
+MIN_CONF=0.6                  # Simple confidence proxy
+MAX_SLIPPAGE_BPS=50           # Max slippage vs Kalshi ask
+TIME_IN_FORCE=ioc             # ioc | gtc
+POST_ONLY=false
+
+# Predictions (from Python bot)
+MAPPINGS_FILE=./mappings.yml  # Event→ticker map
+BANKROLL_USD=1000
+METRICS_TICKER_ALLOWLIST=     # Optional comma‑separated tickers for labeled exposure
+
+# Loop
+LOOP_INTERVAL_SEC=30
+JITTER_PCT=0.2
+```
+
+## Build & Run
+
+```
+cd Kalshi/Kalshi_Sports_Go
+go mod tidy
+go build -o kalshi-sports ./cmd/sportsbot
+./kalshi-sports
+```
+
+Metrics: http://localhost:9702/metrics (health: /healthz, readiness: /readyz)
+
+## Predictions (Python → Go)
+Populate `sportsbot.db` (predictions table) by one of:
+
+1) Python scheduled sync (recommended)
+- In Kalshi_Sports/.env:
+  - `SYNC_PREDICTIONS_TO_GO=true`
+  - `GO_SQLITE_PATH=../Kalshi_Sports_Go/sportsbot.db`
+- Run the Python bot (loop or once); it writes latest predictions into the Go DB.
+
+2) One‑shot tools
+- Python:
+  - `python -m src.tools.write_predictions_to_go_sqlite --src ./src/sportsbot.db --dst ../Kalshi_Sports_Go/sportsbot.db`
+- Go:
+  - `go run ./cmd/import_predictions -src ../Kalshi_Sports/src/sportsbot.db -dst sportsbot.db`
+
+## Mappings
+The bot needs `(LEAGUE, home, away, YYYYMMDD) → Kalshi ticker` entries.
+
+Generate in Python:
+
+```
+python -m src.map_events -o mappings.yml
+python -m src.auto_map -o mappings.yml --league NBA
+python -m src.match_kalshi --mappings mappings.yml --tickers kalshi_tickers.yml -o mappings.yml
+```
+
+Place `mappings.yml` next to the binary and set `MAPPINGS_FILE=./mappings.yml`.
+
+## Notes
+### Dry‑run
+- When `DRY_RUN=true`, no credentials are required. The bot logs intended orders and updates SQLite; no orders are sent.
+
+### Slippage guard
+- Compares order limit to Kalshi ask for the chosen side; skips when `|limit - ask|` exceeds `MAX_SLIPPAGE_BPS`.
+
+### Metrics
+- Gauges: bankroll, daily spend, total exposure, realized PnL; per‑ticker exposure with allowlist.
+- Readiness: /readyz returns 200 after first successful quotes fetch on a mapped ticker.
+
+## Settlement
+Use the built‑in tool to settle bets and compute realized PnL:
+
+```
+go run ./cmd/settle -db sportsbot.db -odds_key <ODDS_API_KEY> -leagues NBA,NFL -days 3
+```
+
+Assumes YES=home, NO=away; ensure consistent event keys.
+
+## Troubleshooting
+- Not ready: verify mappings, odds connectivity, and Kalshi creds (for live).
+- 429 from Odds API: increase interval or plan; ensure Retry‑After is honored upstream.
+- No trades: check metrics for edge distribution; adjust MIN_EDGE_BPS/MIN_CONF and confirm predictions are syncing.
+- Order errors: confirm TIME_IN_FORCE/POST_ONLY and that price is within [1,99] cents.
 
 
-
-#Kalshi Sports Bot (Go) — User Guide
-
-Overview
-- A lightweight Go bot that trades Kalshi sports markets using fair probabilities from bookmaker odds and ML predictions produced by the Python bot. It supports dry-run, live trading, basic risk controls, and Prometheus metrics.
-
-What’s Included (zip)
-- kalshi-sports.exe — Windows x64 binary
-- .env.example — configuration template
-- README.md — quick intro
-- USER_GUIDE.md — this guide
-- mappings.example.yml, kalshi_tickers.example.yml — mapping templates
-- sportsbot.db — SQLite database (predictions/signals/bets); pre-populated via importer
-
-Prerequisites
-- Windows x64
-- Optional: The Odds API key (for bookmaker odds)
-- For live: Kalshi API Key ID + RSA private key (PEM)
-
-Quick Start (Windows)
-1) Unzip kalshi_sports_win64.zip
-2) Copy .env.example to .env and edit:
-   - DRY_RUN=true to start safely
-   - ODDS_API_KEY=<your-odds-api-key>
-   - KALSHI_API_KEY_ID=<your-kalshi-key-id> (for live)
-   - KALSHI_PRIVATE_KEY_PATH=<path-to-your-private-key.pem> (for live)
-   - MAPPINGS_FILE=./mappings.yml (create from template)
-3) Ensure mappings.yml has event→ticker entries (see “Mappings”)
-4) Double-click kalshi-sports.exe or run from PowerShell
-5) Metrics: http://localhost:9702/metrics (health: /healthz, readiness: /readyz)
-
-Configuration (.env)
-- DRY_RUN: true|false; safe mode that logs but does not place live orders
-- LOG_LEVEL: INFO|DEBUG|…
-- ODDS_API_KEY / ODDS_API_BASE: The Odds API key and base URL
-- LEAGUES: comma-separated (e.g., NBA,NFL); first league drives odds ingest
-- KALSHI_BASE: Kalshi API base URL
-- KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH: required when DRY_RUN=false
-- MIN_EDGE_BPS, MIN_CONF: edge/confidence thresholds for trading
-- MAX_SLIPPAGE_BPS: max slippage vs Kalshi ask (bps)
-- TIME_IN_FORCE: ioc|gtc; POST_ONLY: true|false
-- BANKROLL_USD: baseline bankroll for metrics
-- METRICS_TICKER_ALLOWLIST: comma-separated tickers to expose per-ticker exposure
-- MAPPINGS_FILE: path to YAML mapping generated by Python tools
-- LOOP_INTERVAL_SEC, JITTER_PCT: loop cadence and jitter
-
-Predictions (from Python)
-- Best accuracy comes from ML predictions generated by the Python bot.
-- Three ways to populate the Go DB (sportsbot.db → predictions table):
-  1) Python scheduled sync:
-     - In Kalshi_Sports/.env set SYNC_PREDICTIONS_TO_GO=true and GO_SQLITE_PATH=../Kalshi_Sports_Go/sportsbot.db
-     - Run the Python bot (loop or once). It writes latest predictions into the Go DB.
-  2) Python one-shot tool:
-     - python -m src.tools.write_predictions_to_go_sqlite --src ./src/sportsbot.db --dst ../Kalshi_Sports_Go/sportsbot.db
-  3) Go importer:
-     - In Kalshi_Sports_Go: go run ./cmd/import_predictions -src ../Kalshi_Sports/src/sportsbot.db -dst sportsbot.db
-
-Mappings
-- The bot needs a mapping from (league, home, away, date) → Kalshi ticker (and optional Polymarket market).
-- Generate candidates in Python:
-  - python -m src.map_events -o mappings.yml (odds-based suggestions)
-  - python -m src.auto_map -o mappings.yml --league NBA (live sources)
-  - Optional: fill from curated kalshi_tickers.yml via python -m src.match_kalshi
-- Copy mappings.yml next to kalshi-sports.exe and set MAPPINGS_FILE=./mappings.yml
-
-Running
-- Dry-run (default): verifies data path, logs decisions, updates SQLite metrics
-- Live: set DRY_RUN=false and Kalshi creds. Orders use IOC/POST_ONLY per .env. The bot chooses YES/NO by comparing fair probability vs Kalshi asks and trades when thresholds pass.
-- Metrics endpoints:
-  - /metrics: Prometheus
-  - /healthz: 200 when process is up
-  - /readyz: 200 after first successful Kalshi quotes fetch on a mapped ticker
-
-Settlement
-- Use the Go settle tool to settle bets and compute realized PnL:
-  - go run ./cmd/settle -db sportsbot.db -odds_key <ODDS_API_KEY> -leagues NBA,NFL -days 3
-- Assumes YES=home, NO=away; rely on consistent event keys in mappings and signals.
-
-Troubleshooting
-- Readiness stays 503:
-  - Check mappings.yml covers current events; ensure ODDS and Kalshi are reachable.
-  - Verify Kalshi creds when DRY_RUN=false.
-- HTTP 429 from Odds API:
-  - Reduce LOOP_INTERVAL_SEC; upgrade plan; verify Retry-After honored by upstream.
-- No trades placed:
-  - Inspect /metrics for edge distributions; adjust MIN_EDGE_BPS and MIN_CONF; verify predictions are synced.
-- Exec errors placing orders:
-  - Verify TIME_IN_FORCE and POST_ONLY compatibility; ensure price within [1,99].
-
-Safety
-- Start in DRY_RUN. Enable live only after verifying mappings and predictions.
-- Keep private keys secure; PEM file path must be accessible to the bot.
-
-Upgrading
-- Replace kalshi-sports.exe and .env as needed. Database schema upgrades are applied automatically (non-destructive). Re-run import_predictions if you ship a new Python DB.
 
 
 
